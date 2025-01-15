@@ -13,12 +13,10 @@
  */
 package org.gbif.sequence.spark;
 
-import java.io.IOException;
 import java.io.Serializable;
 
-import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.api.java.UDF1;
 import org.apache.spark.sql.types.DataTypes;
 
 import lombok.Builder;
@@ -28,24 +26,34 @@ public class FastaBuilder implements Serializable {
   private final String hiveDB;
   private final String targetFile;
 
-  public static void main(String[] args) throws IOException {
-    FastaBuilder.builder().hiveDB("prod_h").targetFile("/tmp/sequences.fasta").build().run();
+  public static void main(String[] args) {
+    FastaBuilder.builder().hiveDB(args[0]).targetFile(args[1]).build().run();
   }
 
-  public void run() throws IOException {
+  public void run() {
     SparkSession spark =
         SparkSession.builder().appName("FASTA Builder").enableHiveSupport().getOrCreate();
     spark.sql("use " + hiveDB);
     spark.sparkContext().conf().set("hive.exec.compress.output", "false");
-    spark.udf().register("normalize", new NormalizeSequenceUDF(), DataTypes.StringType);
 
-    Dataset<Row> results =
-        spark.sql(
-            "SELECT normalize(dnasequence) AS seq, md5(normalize(dnasequence)) AS dnaSequenceID "
-                + "FROM occurrence_ext_gbif_dnaderiveddata "
-                + "WHERE dnasequence IS NOT NULL AND length(dnasequence)>0 "
-                + "GROUP BY normalize(dnasequence), md5(normalize(dnasequence))");
+    UDF1<String, String> normalize =
+        s ->
+            s != null && s.length() > 0
+                ? s.toUpperCase().replaceAll("[^ACGTURYSWKMBDHVN]", "")
+                : null;
 
-    results.write().csv(targetFile);
+    spark.udf().register("normalize", normalize, DataTypes.StringType);
+
+    String sql =
+        String.format(
+            "      WITH sequences AS ("
+                + "  SELECT normalize(dnasequence) AS seq "
+                + "  FROM occurrence_ext_gbif_dnaderiveddata "
+                + "  WHERE dnasequence IS NOT NULL AND length(dnasequence) > 0 "
+                + "  GROUP BY normalize(dnasequence)"
+                + ") "
+                + "SELECT concat('>', md5(seq), '\n', seq) AS f FROM sequences");
+
+    spark.sql(sql).write().text(targetFile);
   }
 }
